@@ -1,148 +1,164 @@
-import cv2
+import cv2 as cv
 import numpy as np
 
-backSub = cv2.createBackgroundSubtractorMOG2(history = 100, varThreshold = 40)
+# initialize threshold with HSV color range for green colored objects
+threshold_lower = (50, 100, 100)
+threshold_upper = (70, 255, 255)
+
+# initialize background subtractor
+background_subtraction = cv.createBackgroundSubtractorMOG2(1000, 50)
+
+# initialize kalman filter
+kalman_filter = cv.KalmanFilter(4, 2)
 
 # Start capturing the video from webcam
-video_capture = cv2.VideoCapture(0)
-frame_previous = None
+video_capture = cv.VideoCapture(0)
 roi = None
-center_previous = None
+
+FONT = cv.FONT_HERSHEY_TRIPLEX
 
 def cam():
-    global frame_previous
-    global roi
+    global frame # global frame so it can be used in mouse_get_threshold()
+    global roi # global region of interest so it's stored after being select in the first frame
     
     if not video_capture.isOpened():
         video_capture.open(0)
     # Store the current frame of the video in the variable frame
     ret, frame = video_capture.read()
+    
     # Flip the image to make it right
-    frame = cv2.flip(frame, 1)
+    frame = cv.flip(frame,1)
     
+    # If region of interest isn't defined prompt user to define one
     if roi is None:
-        roi = cv2.selectROI('Camera Output', frame, False)    
-    
-    # Crop image
+        roi = cv.selectROI('Select Roi', frame, False)
+        cv.destroyWindow('Select Roi')
+        if roi == ((0,0,0,0)): # if selection is canceled use whole frame
+            height, width, _ = frame.shape
+            roi = ((0,0,width,height))
+        
+    # Crop image with roi's dimensions
     frame_roi = frame[roi[1] : roi[1] + roi[3], roi[0] : roi[0] + roi[2]]
-
-    frame_gray = cv2.cvtColor(frame_roi, cv2.COLOR_BGR2GRAY)
+        
+    # Convert the frame to HSV as it allows better segmentation.
+    frame_hsv = cv.cvtColor(frame_roi, cv.COLOR_BGR2HSV)
     
     # Blur the frame using a Gaussian Filter of kernel size 5, to remove excessive noise
-    frame_blurred = cv2.GaussianBlur(frame_gray, (5, 5), 0)
+    frame_blurred = cv.GaussianBlur(frame_hsv, (5,5), 0)
 
-        
-    # 3. Set previous frame and continue if there is None
-    if frame_previous is None:
-        # First frame; there is no previous one yet
-        frame_previous = frame_blurred
-        return None
+    # Create a mask for the frame, showing threshold values
+    frame_segmented = cv.inRange(frame_blurred, threshold_lower, threshold_upper)
     
+    # Remove background, isolating moving objects
+    frame_movement = background_subtraction.apply(frame_segmented)
     
-    frame_difference = backSub.apply(frame_blurred)
+    # Filter smaller areas out
+    frame_thresholded = cv.threshold(src=frame_movement, thresh=20, maxval=255, type=cv.THRESH_BINARY)[1]
     
-    # calculate difference and update previous frame
-    # frame_difference = cv2.absdiff(src1=frame_previous, src2=frame_blurred)
-    
-    frame_previous = frame_blurred
-
-    # 4. Dilute the image a bit to make differences more seeable; more suitable for contour detection
-    frame_difference = cv2.dilate(frame_difference,(5,5), 1)
-
-    # 5. Only take different areas that are different enough (>20 / 255)
-    frame_thresholded = cv2.threshold(src=frame_difference, thresh=20, maxval=255, type=cv2.THRESH_BINARY)[1]
-    
-
     # Erode the masked output to delete small white dots present in the masked image
-    frame_eroded = cv2.erode(frame_thresholded, None, 5)
+    frame_eroded  = cv.erode(frame_thresholded, None, 10)
     # Dilate the resultant image to restore our target
-    frame_masked = cv2.dilate(frame_eroded, None, 5)
-    
+    frame_masked = cv.dilate(frame_eroded, None, 10)
+
     # Draw a contour around the detected motion nad return it's center
-    center = draw_contours(frame_roi, frame_masked)
+    center_mass = draw_contours(frame_roi, frame_masked)
 
     # Display the masked frame in a window located at (x,y) 
-    show_output('Masked Output', frame_masked, 1275, 550) # 300, 200
+    show_output('Masked Output', frame_masked, 1275, 550) # / 300, 200
 
     # Show the output frame in a window located at (x,y) 
-    show_output('Camera Output',frame, 1275, 0) # 950, 200 
-    
-    if center is not None:
-        paddle_x = center[0] * 610 / roi[2]
+    show_output('Camera Output',frame, 1275, 0) # / 950, 200 
+    cv.setMouseCallback('Camera Output',mouse_get_threshold)
+
+    if center_mass is not None:
+        # compensate for roi's different resolution
+        paddle_x = int(center_mass[0]) * 610 / roi[2]
         return paddle_x
 
-
-def show_output(title_output, frame_output, x, y):
-    cv2.imshow(title_output,frame_output)
-    cv2.moveWindow(title_output, x, y)
-    
-
-def draw_contours_all(frame_draw, frame_contours):
-    _, frame_contours = cv2.threshold(frame_contours, 254, 255, cv2.THRESH_BINARY)
-    # Find all contours in the masked image
-    contours, _ = cv2.findContours(frame_contours.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    # Define center of the object to be detected as None
-    center = None
-    for contour in contours:
-        # check if there's at least 1 object with the segmented color
-        if cv2.contourArea(contour) > 1000:
-
-            #  rotated bounding rectangle (https://docs.opencv.org/3.4/dd/d49/tutorial_py_contour_features.html)
-            rect = cv2.minAreaRect(contour)
-            box = cv2.boxPoints(rect)
-            box = np.int0(box)
-            cv2.drawContours(frame_draw, [box], 0, (0, 0, 255), 2)
-
-            # Calculate the centroid of the object
-            # "formula from (https://learnopencv.com/find-center-of-blob-centroid-using-opencv-cpp-python/)"
-            M = cv2.moments(contour)
-            center = (int(M['m10'] / M['m00']), int(M['m01'] / M['m00']))
-    return center
+# correct current position and predict the next, returns the prediction
+def predict_movement(coord_x, coord_y):
+    kalman_filter.measurementMatrix = np.array([[1,0,0,0],[0,1,0,0]],np.float32)
+    kalman_filter.transitionMatrix = np.array([[1,0,1,0],[0,1,0,1],[0,0,1,0],[0,0,0,1]],np.float32)
+    curent = np.array([[np.float32(coord_x)], [np.float32(coord_y)]])
+    kalman_filter.correct(curent)
+    predicted = kalman_filter.predict()
+    return predicted
 
 def draw_contours(frame_draw, frame_contours):
+    # draw a blue rectangle where roi is located at
+    cv.rectangle(frame_draw, (0, 0), (roi[2]-1, roi[3]-1), (255, 0, 0), 2)
     
-    # cv2.rectangle(frame_draw, (roi[0], roi[1]), (roi[0] + roi[2], roi[1] + roi[3]), (255, 0, 0), 2)
-    cv2.rectangle(frame_draw, (0, 0), (roi[2]-1, roi[3]-1), (255, 0, 0), 2)
+    # Filter only clear differences
+    _, frame_contours = cv.threshold(frame_contours, 254, 255, cv.THRESH_BINARY)
     
-    _, frame_contours = cv2.threshold(frame_contours, 254, 255, cv2.THRESH_BINARY)
     # Find all contours in the masked image
-    contours, _ = cv2.findContours(
-        frame_contours.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv.findContours(frame_contours.copy(), cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
 
-    global center_previous
-    # Define center of the object to be detected as None
-    center = None
+    # Define center of the object to be detected and it's predicted center as None
+    center_mass_current = None
+    center_mass_predicted = None
 
     # check if there's at least 1 object with the segmented color
     if len(contours) > 0:
-        cv2.rectangle(frame_draw, (0, 0), (roi[2]-1, roi[3]-1), (0, 255, 0), 2)
+        # draw a green rectangle on top of the blue rectangle to indicate that movement was detected
+        cv.rectangle(frame_draw, (0, 0), (roi[2]-1, roi[3]-1), (0, 255, 0), 2)
         
         # Find the contour with maximum area
-        contours_max = max(contours, key=cv2.contourArea)
-
-        #  rotated bounding rectangle (https://docs.opencv.org/3.4/dd/d49/tutorial_py_contour_features.html)
-        rect = cv2.minAreaRect(contours_max)
-        box = cv2.boxPoints(rect)
-        box = np.int0(box)
-        cv2.drawContours(frame_draw, [box], 0, (0, 0, 255), 2)
+        contours_max = max(contours, key=cv.contourArea)
 
         # Calculate the centroid of the object
         # "formula from (https://learnopencv.com/find-center-of-blob-centroid-using-opencv-cpp-python/)"
-        M = cv2.moments(contours_max)
-        center = (int(M['m10'] / M['m00']), int(M['m01'] / M['m00']))
-        center_previous = center
-    else:
-        center = center_previous
-    return center
+        M = cv.moments(contours_max)
+        center_mass_current = (int(M['m10'] / M['m00']), int(M['m01'] / M['m00']))
 
-def main():  # used for debugging the segmentation without the breakout game running
-    while (1):
+        #  rotated bounding rectangle (https://docs.opencv.org/3.4/dd/d49/tutorial_py_contour_features.html)
+        rect = cv.minAreaRect(contours_max)
+        box = cv.boxPoints(rect)
+        box = np.int0(box)
+        cv.drawContours(frame_draw, [box], 0, (0, 0, 255), 2)
+        # draw text to identify the current position
+        cv.putText(frame_draw, "Current", (int(center_mass_current[0]), int(center_mass_current[1] + 50)), FONT ,0.6, [0,0,255])
+        
+        center_mass_predicted = predict_movement(center_mass_current[0],center_mass_current[1])
+        
+        #  draw the same rotated bounding rectangle but offset to the predicted position
+        for point in box:
+            point[0] += int(center_mass_predicted[2])
+            point[1] += int(center_mass_predicted[3])
+        cv.drawContours(frame_draw, [box], 0, (255, 0, 0), 2)
+        # draw text to identify the predicted position
+        cv.putText(frame_draw, "Predicted", (int(center_mass_predicted[0]), int(center_mass_predicted[1] - 50)), FONT , 0.6, [255, 0, 0])
+
+    return center_mass_predicted
+
+# show window and move it to a specified location so both can be seen simultaneosly
+def show_output(title_output, frame_output, window_x, window_y):
+    cv.imshow(title_output,frame_output)
+    cv.moveWindow(title_output, window_x, window_y)
+
+def mouse_get_threshold(mouse_event,mouse_x,mouse_y,flags,param):
+    if mouse_event == cv.EVENT_LBUTTONDOWN: # checks mouse left button down condition
+        # convert rgb to hsv format
+        color_hsv = cv.cvtColor(np.uint8([[[frame[mouse_y,mouse_x,0] ,frame[mouse_y,mouse_x,1],frame[mouse_y,mouse_x,2] ]]]),cv.COLOR_BGR2HSV)
+        
+        # create a threshold based on the color values
+        temp_lower = color_hsv[0][0][0]  - 10, 100, 100
+        temp_upper = color_hsv[0][0][0] + 10, 255, 255
+        
+        global threshold_lower
+        global threshold_upper
+        # set the threshold
+        threshold_lower = np.array(temp_lower)
+        threshold_upper = np.array(temp_upper)
+    
+def main(): # used for debugging the camera without running the breakout game 
+    while(True):
         cam()
-        if cv2.waitKey(20) & 0xFF == 27:  # wait for Esc key
+        if cv.waitKey(20) & 0xFF == 27: #  wait for Esc key
             break
     video_capture.release()
-    cv2.destroyAllWindows()
+    cv.destroyAllWindows()
 
-if __name__ == '__main__':  # only run main() if executing directly from it's file and not being imported
+if __name__ == '__main__': # only run main() if executing directly from it's file and not being imported
     main()
+    

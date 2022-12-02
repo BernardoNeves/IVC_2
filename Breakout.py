@@ -2,8 +2,7 @@ import time
 import tkinter as tk
 from collections import deque
 
-import Cam2 as Cam
-
+import Cam as Cam
 
 class GameObject(object):
     def __init__(self, canvas, item):
@@ -18,7 +17,6 @@ class GameObject(object):
 
     def delete(self):
         self.canvas.delete(self.item)
-
 
 class Ball(GameObject):
     def __init__(self, canvas, x, y):
@@ -60,7 +58,6 @@ class Ball(GameObject):
         for game_object in game_objects:
             if isinstance(game_object, Brick):
                 game_object.hit()
-
 
 class Paddle(GameObject):
     def __init__(self, canvas, x, y):
@@ -113,7 +110,6 @@ class Brick(GameObject):
         else:
             self.canvas.itemconfig(self.item,
                                    fill=Brick.COLORS[self.hits])
-
 
 class Game(tk.Frame):
     def __init__(self, master):
@@ -186,8 +182,6 @@ class Game(tk.Frame):
         if object_coords != None:
             paddle_coords = self.paddle.get_position()
             offset = object_coords - paddle_coords[0]
-            # if abs(offset) > 10:
-            #     self.paddle.move(offset)
             self.paddle.move(offset)
 
         self.check_collisions()
@@ -211,7 +205,6 @@ class Game(tk.Frame):
         items = self.canvas.find_overlapping(*ball_coords)
         objects = [self.items[x] for x in items if x in self.items]
         self.ball.collide(objects)
-
 
 if __name__ == '__main__':
     time.sleep(2)
